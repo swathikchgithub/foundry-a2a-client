@@ -6,6 +6,7 @@ Commands:
   python foundry_client.py create            # create/update the Foundry agent (new version)
   python foundry_client.py ask "ticket text"  # one-shot question
   python foundry_client.py chat              # interactive multi-turn chat
+  python foundry_client.py enable-a2a        # expose this agent as an A2A endpoint (incoming A2A)
   python foundry_client.py delete            # delete all versions of the agent
 
 Auth: uses DefaultAzureCredential, so run `az login` first.
@@ -16,7 +17,18 @@ import os
 import sys
 
 from azure.ai.projects import AIProjectClient
-from azure.ai.projects.models import A2AProtocolVersion, A2ATool, PromptAgentDefinition
+from azure.ai.projects.models import (
+    A2AProtocolConfiguration,
+    A2AProtocolVersion,
+    A2ATool,
+    AgentCard,
+    AgentCardSkill,
+    AgentEndpointConfig,
+    FixedRatioVersionSelectionRule,
+    PromptAgentDefinition,
+    ProtocolConfiguration,
+    VersionSelector,
+)
 from azure.identity import DefaultAzureCredential
 from dotenv import load_dotenv
 
@@ -101,6 +113,46 @@ def chat(project: AIProjectClient) -> None:
         openai.conversations.delete(conversation_id=conversation.id)
 
 
+def enable_a2a(project: AIProjectClient) -> None:
+    """Turn on incoming A2A so other agents (e.g. scripts/call_foundry_agent.py) can call this agent.
+
+    Uses a merge-patch, so other protocols already enabled on the endpoint are left alone.
+    If the endpoint has no version selector yet, route 100% of traffic to the latest version.
+    """
+    name = agent_name()
+    details = project.agents.get(agent_name=name)
+    endpoint = AgentEndpointConfig(protocol_configuration=ProtocolConfiguration(a2a=A2AProtocolConfiguration()))
+
+    existing = details.agent_endpoint
+    if not (existing and existing.version_selector):
+        latest = details.versions.latest.version
+        endpoint.version_selector = VersionSelector(
+            version_selection_rules=[FixedRatioVersionSelectionRule(agent_version=latest, traffic_percentage=100)]
+        )
+        print(f"Routing A2A traffic to version {latest}")
+
+    card = AgentCard(
+        version="1.0.0",
+        description="IT helpdesk orchestrator: triages IT tickets and gives first-step guidance.",
+        skills=[
+            AgentCardSkill(
+                id="helpdesk",
+                name="IT helpdesk",
+                description="Classify and route an IT support ticket, and suggest first steps for the user.",
+                tags=["itsm", "helpdesk"],
+                examples=["My VPN keeps disconnecting every 10 minutes."],
+            )
+        ],
+    )
+    project.agents.update_details(agent_name=name, agent_endpoint=endpoint, agent_card=card)
+
+    base = f"{env('PROJECT_ENDPOINT').rstrip('/')}/agents/{name}/endpoint/protocols/a2a"
+    print(f"Incoming A2A enabled for '{name}'.")
+    print(f"A2A base URL: {base}")
+    print(f"Agent card:   {base}/.well-known/agent-card.json")
+    print("Callers need an Entra token for https://ai.azure.com and the Foundry Agent Consumer role (or higher).")
+
+
 def delete(project: AIProjectClient) -> None:
     project.agents.delete(agent_name=agent_name())
     print(f"Deleted agent '{agent_name()}'")
@@ -112,6 +164,7 @@ def main() -> None:
     sub.add_parser("create")
     sub.add_parser("chat")
     sub.add_parser("delete")
+    sub.add_parser("enable-a2a")
     ask_parser = sub.add_parser("ask")
     ask_parser.add_argument("text")
     args = parser.parse_args()
@@ -123,6 +176,8 @@ def main() -> None:
             ask(project, args.text)
         elif args.command == "chat":
             chat(project)
+        elif args.command == "enable-a2a":
+            enable_a2a(project)
         elif args.command == "delete":
             delete(project)
 
