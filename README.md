@@ -1,48 +1,100 @@
 # foundry-a2a-client
 
-Agent-to-Agent (A2A v1.0) between Azure AI Foundry and your laptop, in **both directions**:
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+![A2A](https://img.shields.io/badge/A2A_protocol-v1.0-green)
 
-| Direction | Who calls whom | Script |
+Agent-to-Agent (**A2A v1.0**) communication between an **Azure AI Foundry agent** and an
+agent running on **your laptop**, in both directions. It's built to run locally first and
+deploy to the cloud later.
+
+| Direction | Who calls whom | Commands |
 |---|---|---|
-| **A. Foundry → local** | Foundry agent uses the A2A tool to call the Ticket Triage Agent on your laptop | `foundry_client.py create / ask / chat` |
+| **A. Foundry → local** | A Foundry agent uses the built-in A2A tool to call the Ticket Triage Agent on your laptop | `foundry_client.py create / ask / chat` |
 | **B. Local → Foundry** | A script on your laptop calls the Foundry agent's own A2A endpoint | `foundry_client.py enable-a2a` + `scripts/call_foundry_agent.py` |
-
-**Direction A:**
-
-```
- you ──► foundry_client.py ──► Foundry agent "helpdesk-orchestrator" (gpt-4.1-mini)
-                                     │  A2A tool (v1.0, JSON-RPC, x-api-key)
-                                     ▼
-                         HTTPS tunnel (devtunnel / ngrok)
-                                     ▼
-                     a2a_agent/server.py on your laptop  ("Ticket Triage Agent")
-```
-
-* `a2a_agent/` is the remote agent. It's a small A2A v1.0 server built on the official
-  `a2a-sdk`. It classifies an IT ticket into one of 8 categories and returns the
-  priority and owning team. The logic in `triage.py` is a keyword classifier, so it
-  runs without a GPU. Swap it for a real model later.
-* `foundry_client.py` is the Foundry side. It creates a prompt agent with the A2A tool
-  and lets you `ask` it once or `chat` with it.
-* `scripts/test_a2a_local.py` calls the A2A agent directly, the way Foundry will.
-* `scripts/call_foundry_agent.py` is the direction B client. It calls a Foundry agent over A2A.
 
 ---
 
-## Step by step
+## Use case: IT helpdesk triage
 
-### 0. Prerequisites
+An employee writes: *"I clicked a link in a weird email and it asked for my password. Urgent!"*
 
-* Python 3.10+
-* [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli), signed in with `az login`
-* A Foundry project (new Foundry) with a model deployment such as `gpt-4.1-mini`
-* Roles on the project: **Foundry Project Manager** to create the connection and
-  **Foundry User** to create and run the agent
-* A tunnel tool so Foundry (in Azure) can reach your laptop. Use one of:
-  * [Microsoft Dev Tunnels](https://learn.microsoft.com/azure/developer/dev-tunnels/get-started): `devtunnel`
-  * [ngrok](https://ngrok.com/download)
+1. The **Foundry agent** (`helpdesk-orchestrator`, a GPT model in Azure) recognises an IT
+   ticket and calls the **Ticket Triage Agent** over A2A.
+2. The **Ticket Triage Agent** replies:
+   `Category: Security_Phishing · Priority: P1 · Route to: Security Operations`.
+3. The Foundry agent turns that into a helpful answer, for example: *"Disconnect from the network and don't
+   enter any credentials. I've flagged this as P1 for Security Operations…"*
 
-### 1. Install
+Think of it as a **receptionist** (the Foundry agent talks to the user) and a **specialist**
+(the triage agent does one job well). A2A is the standard protocol they use, so either side
+can be replaced without rewriting the other.
+
+**Why split into two agents?**
+- The specialist can be **your own model**. You can swap the keyword triage for a fine-tuned classifier.
+- It can be **owned by another team** or run on another platform and still plug in.
+- **Many agents can reuse it**: a helpdesk bot, an email bot, an ITSM integration.
+
+---
+
+## Architecture
+
+**Direction A: Foundry calls your laptop**
+
+```
+ you ──► foundry_client.py ──► Foundry agent "helpdesk-orchestrator"  (Azure, gpt-4.1-mini)
+                                     │  A2A tool (v1.0 JSON-RPC, x-api-key header)
+                                     │  via project connection "ticket-triage-a2a"
+                                     ▼
+                         HTTPS tunnel  (Dev Tunnels / ngrok)
+                                     ▼
+                  a2a_agent/server.py on your laptop  ("Ticket Triage Agent")
+```
+
+The tunnel is only needed because Azure can't reach `localhost`. Once the triage agent is
+deployed to the cloud, the tunnel goes away.
+
+**Direction B: your laptop calls Foundry**
+
+```
+ scripts/call_foundry_agent.py ──A2A SendMessage + Entra token──►
+     https://<account>.services.ai.azure.com/api/projects/<project>/agents/<agent>/endpoint/protocols/a2a
+```
+
+This direction needs no tunnel or connection, because your laptop calls out to Azure.
+
+---
+
+## Project structure
+
+```
+foundry-a2a-client/
+├── a2a_agent/
+│   ├── server.py             # A2A v1.0 server (official a2a-sdk): agent card + JSON-RPC, x-api-key auth
+│   └── triage.py             # ticket triage logic (keyword-based, no GPU; swap for a real model)
+├── scripts/
+│   ├── test_a2a_local.py     # call the local A2A agent directly, the way Foundry will
+│   └── call_foundry_agent.py # direction B: A2A client that calls a Foundry agent
+├── foundry_client.py         # Foundry side: create / ask / chat / enable-a2a / delete
+├── requirements.txt
+├── .env.example              # all settings, documented
+└── LICENSE
+```
+
+---
+
+## Prerequisites
+
+- Python 3.10+
+- [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli), signed in with `az login`
+- A Foundry project (new Foundry) with a model deployment, for example `gpt-4.1-mini`
+- Azure roles on the project:
+  - **Foundry Project Manager** to create the A2A connection (direction A)
+  - **Foundry User** to create and run the agent
+  - **Foundry Agent Consumer** (or higher) to call the agent over A2A (direction B)
+- For direction A only, a tunnel: [Microsoft Dev Tunnels](https://learn.microsoft.com/azure/developer/dev-tunnels/get-started) or [ngrok](https://ngrok.com/download)
+
+## Install
 
 ```bash
 git clone https://github.com/swathikchgithub/foundry-a2a-client.git
@@ -53,168 +105,143 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Generate an API key for the A2A agent and put it in `.env` as `A2A_API_KEY`:
+## Configuration (`.env`)
 
-```bash
-python -c "import secrets; print(secrets.token_urlsafe(32))"
-```
+| Variable | Used by | Description |
+|---|---|---|
+| `A2A_PORT` | local agent | Port the local A2A server listens on (default `8000`) |
+| `A2A_PUBLIC_URL` | local agent | Public URL advertised in the agent card (your tunnel URL) |
+| `A2A_API_KEY` | local agent | Shared secret Foundry must send as `x-api-key`. Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
+| `PROJECT_ENDPOINT` | Foundry | Project endpoint from the Foundry portal's **Overview** page |
+| `MODEL_DEPLOYMENT_NAME` | Foundry | Model deployment name, for example `gpt-4.1-mini` |
+| `A2A_CONNECTION_NAME` | Foundry | Name of the A2A connection in Foundry (default `ticket-triage-a2a`) |
+| `FOUNDRY_AGENT_NAME` | Foundry | Name of the Foundry agent (default `helpdesk-orchestrator`) |
 
-### 2. Run the A2A agent locally
+`.env` is git-ignored, so it never gets committed.
 
+---
+
+## Direction A: Foundry agent → local agent
+
+### A1. Run the local A2A agent
 ```bash
 python -m a2a_agent.server
 ```
-
 In a second terminal:
-
 ```bash
 python scripts/test_a2a_local.py --url http://localhost:8000 "I clicked a link in a suspicious email, urgent"
 ```
+Expected output: `Category: Security_Phishing / Priority: P1 / Route to: Security Operations`.
 
-You should see `Category: Security_Phishing / Priority: P1 / Route to: Security Operations`.
-
-### 3. Expose it over public HTTPS
-
-Foundry runs in Azure, so it can't call `localhost`. Open a tunnel to port 8000.
-
-**Dev Tunnels**
+### A2. Expose it over public HTTPS
 ```bash
+# Dev Tunnels
 devtunnel user login
-devtunnel host -p 8000 --allow-anonymous
-# copy the "Connect via browser" URL, e.g. https://abc123-8000.usw2.devtunnels.ms
+devtunnel host -p 8000 --allow-anonymous      # copy the https://...devtunnels.ms URL
+
+# or ngrok
+ngrok http 8000                               # copy the https://...ngrok-free.app URL
 ```
-`--allow-anonymous` only disables the tunnel's own login page. The server still
-rejects any request that doesn't send your `x-api-key`. The agent card is the
-only exception, because it's public by design.
+`--allow-anonymous` only skips the tunnel's own login page. The server still rejects any
+request without your `x-api-key`. The agent card is the only exception, because it's public by design.
 
-**ngrok**
-```bash
-ngrok http 8000
-# copy the https://xxxx.ngrok-free.app URL
-```
-
-### 4. Point the agent card at the tunnel
-
-Set the tunnel URL in `.env`, then **restart** the server:
-
-```
-A2A_PUBLIC_URL=https://abc123-8000.usw2.devtunnels.ms
-```
-
-Verify end to end through the tunnel:
-
+### A3. Point the agent card at the tunnel
+Set `A2A_PUBLIC_URL=<tunnel URL>` in `.env`, **restart the server**, then check the agent
+through the tunnel:
 ```bash
 python scripts/test_a2a_local.py
 ```
 
-### 5. Create the A2A connection in Foundry
-
-**Portal:**
-1. Go to [ai.azure.com](https://ai.azure.com) and make sure the **New Foundry** toggle is on. Open your project.
-2. Go to **Tools** → **Connect tool** → **Custom** tab → **Agent2Agent (A2A)** → **Create**.
-3. Set **Name** to `ticket-triage-a2a`. This must match `A2A_CONNECTION_NAME` in `.env`.
-4. Set **A2A Agent Endpoint** to your tunnel URL, for example `https://abc123-8000.usw2.devtunnels.ms`.
-5. Under **Authentication**, choose key-based. Set the credential name to `x-api-key` and the
-   value to your `A2A_API_KEY`.
+### A4. Create the A2A connection in Foundry
+**Portal:** go to [ai.azure.com](https://ai.azure.com) (New Foundry toggle on), open your project, then **Tools** →
+**Connect tool** → **Custom** → **Agent2Agent (A2A)** → **Create**.
+- **Name:** `ticket-triage-a2a` (must match `A2A_CONNECTION_NAME`)
+- **A2A Agent Endpoint:** your tunnel URL
+- **Authentication:** key-based. Credential name `x-api-key`, value = your `A2A_API_KEY`
 
 **Or with the Azure Developer CLI:**
 ```bash
 azd ai project set "$PROJECT_ENDPOINT"
 azd ai connection create ticket-triage-a2a \
   --kind remote-a2a \
-  --target https://abc123-8000.usw2.devtunnels.ms \
+  --target https://<your-tunnel-url> \
   --auth-type custom-keys \
   --custom-key "x-api-key=$A2A_API_KEY"
 ```
 
-### 6. Fill in the Foundry settings in `.env`
-
-```
-PROJECT_ENDPOINT=https://<account>.services.ai.azure.com/api/projects/<project>
-MODEL_DEPLOYMENT_NAME=gpt-4.1-mini
-A2A_CONNECTION_NAME=ticket-triage-a2a
-FOUNDRY_AGENT_NAME=helpdesk-orchestrator
-```
-
-`PROJECT_ENDPOINT` is on the project **Overview** page in the Foundry portal.
-
-### 7. Create the Foundry agent with the A2A tool
-
+### A5. Create the Foundry agent with the A2A tool
 ```bash
 python foundry_client.py create
 ```
+Each run creates a new **version** of the agent.
 
-Each run creates a new **version** of `helpdesk-orchestrator`. The calls below always
-use the latest version.
-
-### 8. Talk to it
-
+### A6. Talk to it
 ```bash
 python foundry_client.py ask "My laptop connects to wifi but shows no internet. Blocking my work."
 python foundry_client.py chat
 ```
-
-While the agent is answering, the server terminal shows a log line
-`A2A request (context=...)`. That line confirms Foundry called your local agent
-over A2A.
+**How you know it worked:** the answer includes the category, priority and team, and the
+server terminal logs `A2A request (context=...)` at the same moment.
 
 ---
 
 ## Direction B: local client → Foundry agent
 
-Here your laptop is the **caller** and the Foundry agent is the **A2A server**:
-
-```
-scripts/call_foundry_agent.py ──A2A SendMessage + Entra token──►
-   https://<account>.services.ai.azure.com/api/projects/<project>/agents/<agent>/endpoint/protocols/a2a
-```
-
-No tunnel and no project connection are needed, because your laptop calls out to Azure.
-
-### B1. Make sure the Foundry agent exists
+### B1. Create the agent (if you haven't already)
 ```bash
 python foundry_client.py create
 ```
 
-### B2. Turn on incoming A2A for the agent
+### B2. Enable incoming A2A on the agent
 ```bash
 python foundry_client.py enable-a2a
 ```
-This calls `project.agents.update_details(...)`, which turns on the A2A protocol on the agent's endpoint
-and publishes an agent card. It prints the A2A base URL. Incoming A2A can't be switched on in the
-portal yet; it has to be done through the SDK or REST API.
+This calls `project.agents.update_details(...)`, which turns on the A2A protocol on the agent
+endpoint and publishes an agent card. It prints the agent's A2A URL. Incoming A2A can't be
+enabled in the portal yet; it has to go through the SDK or REST API.
 
-### B3. Give your identity permission
-The identity you `az login` with needs the **Foundry Agent Consumer** role (or higher) on the project.
-In the Azure portal, open the Foundry resource and go to Access control (IAM) → Add role assignment.
+### B3. Grant permission
+Assign the **Foundry Agent Consumer** role on the project to the identity you `az login`
+with. In the Azure portal, open the Foundry resource → **Access control (IAM)** → **Add role assignment**.
 
 ### B4. Call it
 ```bash
-python scripts/call_foundry_agent.py --card                       # see the agent card
-python scripts/call_foundry_agent.py "My VPN keeps disconnecting"  # one message
-python scripts/call_foundry_agent.py --chat                        # multi-turn, keeps the contextId
+python scripts/call_foundry_agent.py --card                        # print the agent card
+python scripts/call_foundry_agent.py "My VPN keeps disconnecting"   # one message
+python scripts/call_foundry_agent.py --chat                         # multi-turn (keeps contextId)
+python scripts/call_foundry_agent.py --agent other-agent "hi"       # any agent with incoming A2A
 ```
+The script gets an Entra token for `https://ai.azure.com` from your `az login`, fetches the
+agent card, and sends an A2A v1.0 JSON-RPC `SendMessage` request.
 
-The script gets a token for `https://ai.azure.com` from your `az login`, fetches the agent card,
-and sends an A2A v1.0 JSON-RPC `SendMessage` request.
+**Full round trip:** `helpdesk-orchestrator` still has the A2A tool from direction A. If the
+local server and tunnel are running, one request goes **laptop → Foundry → laptop → Foundry → laptop**.
 
-**Full round trip:** `helpdesk-orchestrator` also holds the A2A tool from direction A. If your
-local triage server and tunnel are running, one call goes
-**laptop → Foundry → laptop → Foundry → laptop**. If they aren't running, the Foundry agent still
-answers, but its tool call fails. Point `--agent` at any other Foundry agent with incoming A2A
-enabled to test direction B on its own.
-
-Limits on Foundry's incoming A2A: v1.0 supports JSON-RPC only, text parts only, and no streaming.
-Tasks and contexts are kept for 60 days.
+**Limits on Foundry's incoming A2A:** v1.0 supports JSON-RPC only, text parts only, and no streaming. Tasks and
+contexts are kept for 60 days after their last write.
 
 ---
 
-### 9. Clean up
+## Command reference
+
+| Command | What it does |
+|---|---|
+| `python -m a2a_agent.server` | Start the local Ticket Triage A2A agent |
+| `python scripts/test_a2a_local.py [--url URL] ["ticket"]` | Call the local agent directly |
+| `python foundry_client.py create` | Create a new version of the Foundry agent with the A2A tool |
+| `python foundry_client.py ask "text"` | Send one question to the Foundry agent |
+| `python foundry_client.py chat` | Multi-turn chat with the Foundry agent |
+| `python foundry_client.py enable-a2a` | Expose the Foundry agent as an A2A endpoint |
+| `python scripts/call_foundry_agent.py ["text" \| --chat \| --card]` | Call the Foundry agent over A2A |
+| `python foundry_client.py delete` | Delete the Foundry agent (all versions) |
+
+## Clean up
 
 ```bash
 python foundry_client.py delete
 ```
-Then stop the tunnel and the server.
+Then stop the tunnel and the server. Delete the `ticket-triage-a2a` connection in the
+portal if you no longer need it.
 
 ---
 
@@ -223,21 +250,37 @@ Then stop the tunnel and the server.
 | Symptom | Fix |
 |---|---|
 | Server logs `Rejected request ... bad or missing x-api-key` | The connection's credential name must be exactly `x-api-key`, and its value must match `A2A_API_KEY`. |
-| Foundry can't reach the agent, or you get TLS errors | Make sure the tunnel is running and `python scripts/test_a2a_local.py` works against the tunnel URL. |
-| Agent answers without calling the tool | Send a clear ticket. The instructions tell it to call the tool for IT problems. You can also add `tool_choice="required"` in `respond()`. |
-| `Set PROJECT_ENDPOINT in .env` | Copy the endpoint from the project Overview page. |
+| Foundry can't reach the agent, or you get TLS errors | Check the tunnel is running and `python scripts/test_a2a_local.py` works against the tunnel URL. |
+| Agent answers without calling the tool | Send a clear IT ticket, or add `tool_choice="required"` in `respond()` in `foundry_client.py`. |
+| Connection not found | `A2A_CONNECTION_NAME` must match the connection name in Foundry. |
 | `DefaultAzureCredential` failed | Run `az login`, and `az account set -s <subscription>` if needed. |
-| Connection not found | The `A2A_CONNECTION_NAME` in `.env` must match the connection name in the portal. |
 | `call_foundry_agent.py`: 401 | Run `az login`. The token must be for `https://ai.azure.com`. |
-| `call_foundry_agent.py`: 403 | Assign the Foundry Agent Consumer role on the project to the signed-in identity. |
+| `call_foundry_agent.py`: 403 | Assign the Foundry Agent Consumer role on the project. |
 | `call_foundry_agent.py`: 404 | Check the agent name, and run `python foundry_client.py enable-a2a`. |
-| The tunnel URL changed | Update `A2A_PUBLIC_URL`, restart the server, and edit the connection's endpoint in Foundry. |
+| The tunnel URL changed | Update `A2A_PUBLIC_URL`, restart the server, and update the connection endpoint in Foundry. |
 
-## Later: deploy to the cloud
+---
 
-The server is a plain ASGI app (`a2a_agent.server:app`), so it containerizes directly.
-Use Azure Container Apps, or App Service with
-`uvicorn a2a_agent.server:app --host 0.0.0.0 --port 8000`. Keep `A2A_API_KEY` in
-Key Vault or as a Container Apps secret. Set `A2A_PUBLIC_URL` to the app's URL and
-update the Foundry connection target. Once it runs in Azure you can replace the API
-key with `project-managed-identity` auth.
+## Roadmap
+
+- [ ] Replace the keyword triage in `a2a_agent/triage.py` with a fine-tuned classifier
+      (for example the LoRA TicketSense model)
+- [ ] Containerize and deploy the triage agent to Azure Container Apps (drop the tunnel)
+- [ ] Switch from the API key to `project-managed-identity` auth once the agent runs in Azure
+- [ ] Register the triage agent in Foundry Control Plane for governance and monitoring
+
+**Deployment note:** the server is a plain ASGI app (`a2a_agent.server:app`). Run it with
+`uvicorn a2a_agent.server:app --host 0.0.0.0 --port 8000`. Keep `A2A_API_KEY` in Key Vault
+or as a Container Apps secret, set `A2A_PUBLIC_URL` to the app URL, and update the Foundry
+connection target.
+
+## References
+
+- [Connect to an A2A agent endpoint from Foundry Agent Service](https://learn.microsoft.com/azure/foundry/agents/how-to/tools/agent-to-agent)
+- [Enable incoming A2A on a Foundry agent](https://learn.microsoft.com/azure/foundry/agents/how-to/enable-agent-to-agent-endpoint)
+- [Agent2Agent (A2A) authentication](https://learn.microsoft.com/azure/foundry/agents/concepts/agent-to-agent-authentication)
+- [A2A protocol](https://a2a-protocol.org) · [a2a-python SDK](https://github.com/a2aproject/a2a-python)
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
